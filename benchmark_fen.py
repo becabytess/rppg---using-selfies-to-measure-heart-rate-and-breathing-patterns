@@ -91,25 +91,33 @@ class UBFC_Dataset(Dataset):
         self.subjects = subjects 
         self.seq_len = seq_len
         self.possible_ranges = []
+        
+        self.signals = {}
+        self.colors = {}
+        
+        print("Pre-loading dataset files into memory to avoid I/O bottlenecks...")
+        start_time = time.time()
         for subject in subjects:
             signal_path = os.path.join(data_path, subject, 'ground_truth.txt')
-            # Load signal to determine shape
-            signal = np.loadtxt(signal_path)
+            colors_path = os.path.join(data_path, subject, 'roi_colors.txt')
+            
+            self.signals[subject] = np.loadtxt(signal_path)
+            self.colors[subject] = np.loadtxt(colors_path, delimiter=',')
+            
             # Ground truth shape is [3, length]
-            num_starts = signal.shape[-1] - seq_len 
+            num_starts = self.signals[subject].shape[-1] - seq_len 
             for i in range(num_starts): 
                 self.possible_ranges.append((subject, i)) 
+        print(f"Pre-loading complete in {time.time() - start_time:.2f}s! Total samples: {len(self.possible_ranges)}")
 
     def __len__(self):
         return len(self.possible_ranges)
 
     def __getitem__(self, index):
         subject, i = self.possible_ranges[index]
-        signal_path = os.path.join(self.data_path, subject, 'ground_truth.txt')
-        colors_path = os.path.join(self.data_path, subject, 'roi_colors.txt')
         
-        signals = np.loadtxt(signal_path)
-        colors = np.loadtxt(colors_path, delimiter=',')
+        signals = self.signals[subject]
+        colors = self.colors[subject]
         
         # Take Normalized Blood Volume Pulse (first row)
         signal_seq = signals[0, i : i + self.seq_len]
