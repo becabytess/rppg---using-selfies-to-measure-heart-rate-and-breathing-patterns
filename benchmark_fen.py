@@ -261,67 +261,73 @@ class ResidualLSTM(nn.Module):
             return logits, {"active_norm": outputs.norm(dim=-1).mean().item()}
         return logits
 
-# --- 4.5 Feature-Escrow Network (FEN Stacked 2-Layer RNN Active Stream) ---
+# # --- 4.5 Feature-Escrow Network (FEN Stacked 2-Layer RNN Active Stream with Single Escrow) ---
 class FeatureEscrowRNN(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers=2):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         
-        self.x_proj = nn.Linear(input_size, hidden_size)
-        
-        self.cores = nn.ModuleList([
-            nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
-        ])
-        self.gates = nn.ModuleList([
-            nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
-        ])
-        self.escrow_projs = nn.ModuleList([
-            nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
+        # Stacked RNN cells
+        self.cells = nn.ModuleList([
+            nn.RNNCell(input_size if l == 0 else hidden_size, hidden_size) 
+            for l in range(num_layers)
         ])
         
-        self.fc = nn.Linear(hidden_size * (num_layers + 1), 1)
+        # Single gate and escrow projection
+        self.gate = nn.Linear(hidden_size, hidden_size)
+        self.escrow_proj = nn.Linear(hidden_size, hidden_size)
+        self.fc = nn.Linear(hidden_size * 2, 1)
 
     def forward(self, x, return_stats=False):
         B, seq_len, _ = x.shape
+        
+        # Hidden states for each layer (only the final layer h[-1] is depleted)
         h = [torch.zeros(B, self.hidden_size, device=x.device) for _ in range(self.num_layers)]
-        E = [torch.zeros(B, self.hidden_size, device=x.device) for _ in range(self.num_layers)]
+        E = torch.zeros(B, self.hidden_size, device=x.device)
         
         outputs = []
         gate_means = []
         
         for t in range(seq_len):
-            xt = self.x_proj(x[:, t, :])
+            xt = x[:, t, :]
             h_next = []
             
+            # --- 1. Stacked RNN Cells Active Transformation ---
             # Layer 0
-            z0 = h[0] + xt
-            f_raw0 = torch.tanh(self.cores[0](z0) + z0)
-            g0 = torch.sigmoid(self.gates[0](f_raw0))
-            D0 = g0 * f_raw0
-            h0 = f_raw0 - D0
+            h0_n = self.cells[0](xt, h[0])
+            h0 = h0_n + h[0]  # Temporal residual
             h_next.append(h0)
-            E[0] = E[0] + self.escrow_projs[0](D0)
             
             # Deeper layers
             for l in range(1, self.num_layers):
-                zl = h[l] + h_next[l-1]
-                f_rawl = torch.tanh(self.cores[l](zl) + zl)
-                gl = torch.sigmoid(self.gates[l](f_rawl))
-                Dl = gl * f_rawl
-                hl = f_rawl - Dl
+                hl_n = self.cells[l](h_next[l-1], h[l])
+                hl = hl_n + h[l]  # Temporal residual
                 h_next.append(hl)
-                E[l] = E[l] + self.escrow_projs[l](Dl)
                 
+            f_raw = h_next[-1]  # The final layer's raw output
+            
+            # --- 2. Single Escrow Gate ---
+            g = torch.sigmoid(self.gate(f_raw))
+            D = g * f_raw
+            
+            # --- 3. Subtractive Routing / Depletion (applied only to final layer) ---
+            h_next[-1] = f_raw - D
             h = h_next
-            combined = torch.cat([h[-1]] + E, dim=-1)
+            
+            # --- 4. Secure Archiving (Single Escrow) ---
+            E = E + self.escrow_proj(D)
+            
+            # --- 5. Readout Synthesis ---
+            combined = torch.cat([h[-1], E], dim=-1)
             outputs.append(combined.unsqueeze(1))
             
             if return_stats:
-                gate_means.append(g0.mean().item())
+                gate_means.append(g.mean().item())
                 
         outputs = torch.cat(outputs, dim=1)
         logits = self.fc(outputs)
+        
         if return_stats:
             stats = {
                 "active_norm": h[-1].norm(dim=-1).mean().item(),
