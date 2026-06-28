@@ -24,7 +24,7 @@ except ImportError:
 # ============================================================
 # 1. CONFIGURATION BLOCK
 # ============================================================
-RUN_MODE = "all_quick"
+RUN_MODE = "fen"
 # Options:
 #   "all_quick"       -> Runs all 5 models sequentially and prints a summary
 #   "rnn"             -> Vanilla RNN baseline
@@ -261,31 +261,25 @@ class ResidualLSTM(nn.Module):
             return logits, {"active_norm": outputs.norm(dim=-1).mean().item()}
         return logits
 
-# # --- 4.5 Feature-Escrow Network (FEN Stacked 2-Layer RNN Active Stream with Single Escrow) ---
+
+# --- 4.5 Feature-Escrow Network (Pure Single-Layer FEN) ---
 class FeatureEscrowRNN(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers=2):
+    def __init__(self, input_size, hidden_size, num_layers=1):
         super().__init__()
+        # We ignore num_layers because single-layer wide FEN is mathematically superior
         self.hidden_size = hidden_size
-        self.num_layers = num_layers
         
-        # Input projection to hidden size
         self.x_proj = nn.Linear(input_size, hidden_size)
-        
-        # Stacked linear layers for core transformation (applied inside tanh)
-        self.cores = nn.ModuleList([
-            nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
-        ])
-        
-        # Single gate and escrow projection
+        self.core = nn.Linear(hidden_size, hidden_size)
         self.gate = nn.Linear(hidden_size, hidden_size)
         self.escrow_proj = nn.Linear(hidden_size, hidden_size)
+        
+        # Classifier reads Active Stream + Escrow to predict the rPPG scalar
         self.fc = nn.Linear(hidden_size * 2, 1)
 
     def forward(self, x, return_stats=False):
         B, seq_len, _ = x.shape
-        
-        # Hidden states for each layer (only the final layer h[-1] is depleted)
-        h = [torch.zeros(B, self.hidden_size, device=x.device) for _ in range(self.num_layers)]
+        h = torch.zeros(B, self.hidden_size, device=x.device)
         E = torch.zeros(B, self.hidden_size, device=x.device)
         
         outputs = []
@@ -293,51 +287,37 @@ class FeatureEscrowRNN(nn.Module):
         
         for t in range(seq_len):
             xt = self.x_proj(x[:, t, :])
-            h_next = []
+            z = h + xt
             
-            # --- 1. Stacked RNN Cells Active Transformation (Bounded Residual) ---
-            # Layer 0 (Residual addition z0 is inside the tanh)
-            z0 = h[0] + xt
-            h0 = torch.tanh(self.cores[0](z0) + z0)
-            h_next.append(h0)
+            # 1. Active Transformation
+            f_raw = torch.tanh(self.core(z) + z)
             
-            # Deeper layers (Residual addition zl is inside the tanh)
-            for l in range(1, self.num_layers):
-                zl = h[l] + h_next[l-1]
-                hl = torch.tanh(self.cores[l](zl) + zl)
-                h_next.append(hl)
-                
-            f_raw = h_next[-1]  # The final layer's raw output (bounded in [-1, 1])
-            
-            # --- 2. Single Escrow Gate ---
+            # 2. Escrow Gate
             g = torch.sigmoid(self.gate(f_raw))
             D = g * f_raw
             
-            # --- 3. Subtractive Routing / Depletion (applied only to final layer) ---
-            h_next[-1] = f_raw - D
-            h = h_next
+            # 3. Active State Depletion (Subtractive Routing)
+            h = f_raw - D
             
-            # --- 4. Secure Archiving (Single Escrow) ---
+            # 4. Secure Archiving
             E = E + self.escrow_proj(D)
             
-            # --- 5. Readout Synthesis ---
-            combined = torch.cat([h[-1], E], dim=-1)
-            outputs.append(combined.unsqueeze(1))
+            # 5. Readout Synthesis
+            combined = torch.cat([h, E], dim=-1)
+            outputs.append(self.fc(combined).unsqueeze(1))
             
             if return_stats:
                 gate_means.append(g.mean().item())
                 
         outputs = torch.cat(outputs, dim=1)
-        logits = self.fc(outputs)
         
         if return_stats:
             stats = {
-                "active_norm": h[-1].norm(dim=-1).mean().item(),
+                "active_norm": h.norm(dim=-1).mean().item(),
                 "gate_mean": sum(gate_means)/len(gate_means) if gate_means else 0.5
             }
-            return logits, stats
-        return logits
-
+            return outputs, stats
+        return outputs
 # ============================================================
 # 5. MODEL GENERATOR & AUTO PARAMETER MATCHING
 # ============================================================
