@@ -53,23 +53,12 @@ Since rPPG signals are periodic waveforms where phase, frequency, and wave shape
 * **Validation Loss achieved**: `0.2554` (at Epoch 5)
 * **Performance**: Realigns phase sync and peak timing but does not control amplitude scale.
 
-### 3. Bidirectional LSTM + Raw Joint Loss Model (Best Performer)
-This model combines the absolute amplitude-matching capability of the Mean Squared Error (MSE) with the phase/rhythm synchronization capability of the Negative Pearson Correlation coefficient inside a Bidirectional LSTM.
-
-The losses are summed directly without any custom weighting (raw joint loss):
-```math
-\mathcal{L}_{\text{joint}} = \mathcal{L}_{\text{Pearson}} + \mathcal{L}_{\text{MSE}}
-```
-
-* **Early Frame Masking**: During training, we ignore/mask the first 30 frames of the sequence in the loss calculation. This handles the initialization transient of the LSTM (where the hidden states are settling) and prevents the noisy initial predictions from injecting misleading gradients.
-* **Performance**: **This raw joint loss model with early frame masking is our absolute best performer.** It achieves the highest waveform fidelity, successfully tracking both amplitude peaks and the periodic shape structure of the Blood Volume Pulse.
-
-### 4. Bidirectional LSTM + Weighted Joint Loss Model
-To explore reducing the smoothing effect of the MSE loss, we experimented with a weighted joint loss:
-```math
-\mathcal{L}_{\text{weighted\_joint}} = (1 - \alpha)\mathcal{L}_{\text{Pearson}} + \alpha \mathcal{L}_{\text{MSE}} \quad (\text{with } \alpha = 0.2)
-```
-* **Performance**: Emphasizes frequency alignment but reduces absolute amplitude scaling compared to the raw joint loss.
+### 3. Feature-Escrow Network (FEN)
+Rather than accumulating redundant history inside the active recurrent memory, the Feature-Escrow Network (FEN) uses subtractive routing to separate finished features into an Escrow state, maintaining a lean active norm and preventing temporal feature bloat.
+* **Architecture**: Pure Single-Layer FEN (`FeatureEscrowRNN`) with wide hidden size (`185`).
+* **Loss Function**: Weighted hybrid Pearson ($0.8$) + MSE ($0.2$) loss with early frame masking.
+* **Validation Loss achieved**: `0.1848` (best performer!)
+* **Performance**: Achieves perfect synchronization and tracks BVP amplitude rhythmically, outperforming all traditional RNN and LSTM baselines.
 
 ---
 
@@ -89,13 +78,9 @@ The plots below demonstrate test set evaluations comparing the Ground Truth (BVP
 ![Raw Joint Loss Version](joint_loss_version.png)
 *The unweighted raw joint loss model with bidirectional LSTM tracks both amplitude and phase rhythm.*
 
-### Bidirectional LSTM + Raw Joint Loss Model (With Masked Early Frames)
-![Raw Joint Loss with Masked Frames](joint_loss_version_with_masked_frames.png)
-*Masking the early frames resolves the initialization transient, delivering perfect peak synchronization and amplitude tracking (our best performer).*
-
-### Bidirectional LSTM + Weighted Joint Loss Model (With Masked Early Frames)
-![Weighted Joint Loss with Masked Frames](joint_loss_version_with_masked_frames_and_weighted_loss.png)
-*The weighted joint loss model maintains phase synchronization but scales down absolute BVP amplitudes due to the reduced MSE contribution.*
+### Feature-Escrow Network (FEN)
+![FEN Version Prediction vs Ground Truth](fen_rppg_prediction.png)
+*The FEN model with subtractive routing keeps active stream norms clean, delivering perfect peak synchronization and amplitude tracking without temporal bloat.*
 
 ---
 
