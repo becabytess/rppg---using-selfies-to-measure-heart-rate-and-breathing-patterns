@@ -268,10 +268,12 @@ class FeatureEscrowRNN(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         
-        # Stacked RNN cells
-        self.cells = nn.ModuleList([
-            nn.RNNCell(input_size if l == 0 else hidden_size, hidden_size) 
-            for l in range(num_layers)
+        # Input projection to hidden size
+        self.x_proj = nn.Linear(input_size, hidden_size)
+        
+        # Stacked linear layers for core transformation (applied inside tanh)
+        self.cores = nn.ModuleList([
+            nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
         ])
         
         # Single gate and escrow projection
@@ -290,22 +292,22 @@ class FeatureEscrowRNN(nn.Module):
         gate_means = []
         
         for t in range(seq_len):
-            xt = x[:, t, :]
+            xt = self.x_proj(x[:, t, :])
             h_next = []
             
-            # --- 1. Stacked RNN Cells Active Transformation ---
-            # Layer 0
-            h0_n = self.cells[0](xt, h[0])
-            h0 = h0_n + h[0]  # Temporal residual
+            # --- 1. Stacked RNN Cells Active Transformation (Bounded Residual) ---
+            # Layer 0 (Residual addition z0 is inside the tanh)
+            z0 = h[0] + xt
+            h0 = torch.tanh(self.cores[0](z0) + z0)
             h_next.append(h0)
             
-            # Deeper layers
+            # Deeper layers (Residual addition zl is inside the tanh)
             for l in range(1, self.num_layers):
-                hl_n = self.cells[l](h_next[l-1], h[l])
-                hl = hl_n + h[l]  # Temporal residual
+                zl = h[l] + h_next[l-1]
+                hl = torch.tanh(self.cores[l](zl) + zl)
                 h_next.append(hl)
                 
-            f_raw = h_next[-1]  # The final layer's raw output
+            f_raw = h_next[-1]  # The final layer's raw output (bounded in [-1, 1])
             
             # --- 2. Single Escrow Gate ---
             g = torch.sigmoid(self.gate(f_raw))
