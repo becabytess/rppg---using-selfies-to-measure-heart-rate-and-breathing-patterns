@@ -261,53 +261,71 @@ class ResidualLSTM(nn.Module):
             return logits, {"active_norm": outputs.norm(dim=-1).mean().item()}
         return logits
 
-# --- 4.5 Feature-Escrow Network (FEN Wrapping LSTM Active Stream) ---
-class FeatureEscrowLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size):
+# --- 4.5 Feature-Escrow Network (FEN Stacked 2-Layer RNN Active Stream) ---
+class FeatureEscrowRNN(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers=2):
         super().__init__()
         self.hidden_size = hidden_size
-        self.lstm_cell = nn.LSTMCell(input_size, hidden_size)
-        self.gate = nn.Linear(hidden_size, hidden_size)
-        self.escrow_proj = nn.Linear(hidden_size, hidden_size)
-        self.fc = nn.Linear(hidden_size * 2, 1)
+        self.num_layers = num_layers
+        
+        self.x_proj = nn.Linear(input_size, hidden_size)
+        
+        self.cores = nn.ModuleList([
+            nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
+        ])
+        self.gates = nn.ModuleList([
+            nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
+        ])
+        self.escrow_projs = nn.ModuleList([
+            nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
+        ])
+        
+        self.fc = nn.Linear(hidden_size * (num_layers + 1), 1)
 
     def forward(self, x, return_stats=False):
         B, seq_len, _ = x.shape
-        h = torch.zeros(B, self.hidden_size, device=x.device)
-        c = torch.zeros(B, self.hidden_size, device=x.device)
-        E = torch.zeros(B, self.hidden_size, device=x.device)
+        h = [torch.zeros(B, self.hidden_size, device=x.device) for _ in range(self.num_layers)]
+        E = [torch.zeros(B, self.hidden_size, device=x.device) for _ in range(self.num_layers)]
         
         outputs = []
         gate_means = []
         
         for t in range(seq_len):
-            xt = x[:, t, :]
-            # 1. Active Transformation (LSTM Core)
-            h_raw, c = self.lstm_cell(xt, (h, c))
+            xt = self.x_proj(x[:, t, :])
+            h_next = []
             
-            # 2. Escrow Gate evaluation
-            g = torch.sigmoid(self.gate(h_raw))
-            D = g * h_raw
+            # Layer 0
+            z0 = h[0] + xt
+            f_raw0 = torch.tanh(self.cores[0](z0) + z0)
+            g0 = torch.sigmoid(self.gates[0](f_raw0))
+            D0 = g0 * f_raw0
+            h0 = f_raw0 - D0
+            h_next.append(h0)
+            E[0] = E[0] + self.escrow_projs[0](D0)
             
-            # 3. Subtractive Routing / Depletion
-            h = h_raw - D
-            
-            # 4. Secure Archiving (Escrow)
-            E = E + self.escrow_proj(D)
-            
-            # 5. Readout Synthesis at step t
-            combined = torch.cat([h, E], dim=-1)
+            # Deeper layers
+            for l in range(1, self.num_layers):
+                zl = h[l] + h_next[l-1]
+                f_rawl = torch.tanh(self.cores[l](zl) + zl)
+                gl = torch.sigmoid(self.gates[l](f_rawl))
+                Dl = gl * f_rawl
+                hl = f_rawl - Dl
+                h_next.append(hl)
+                E[l] = E[l] + self.escrow_projs[l](Dl)
+                
+            h = h_next
+            combined = torch.cat([h[-1]] + E, dim=-1)
             outputs.append(combined.unsqueeze(1))
             
             if return_stats:
-                gate_means.append(g.mean().detach())
+                gate_means.append(g0.mean().item())
                 
         outputs = torch.cat(outputs, dim=1)
         logits = self.fc(outputs)
         if return_stats:
             stats = {
-                "active_norm": h.norm(dim=-1).mean().item(),
-                "gate_mean": sum(gate_means)/len(gate_means)
+                "active_norm": h[-1].norm(dim=-1).mean().item(),
+                "gate_mean": sum(gate_means)/len(gate_means) if gate_means else 0.5
             }
             return logits, stats
         return logits
@@ -325,7 +343,7 @@ def build_model(mode, hidden_dim):
     elif mode == "lstm_residual":
         return ResidualLSTM(input_size=9, hidden_size=hidden_dim, num_layers=2)
     elif mode == "fen":
-        return FeatureEscrowLSTM(input_size=9, hidden_size=hidden_dim)
+        return FeatureEscrowRNN(input_size=9, hidden_size=hidden_dim, num_layers=2)
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
