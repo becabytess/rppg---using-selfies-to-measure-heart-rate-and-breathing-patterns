@@ -84,20 +84,7 @@ The plots below demonstrate test set evaluations comparing the Ground Truth (BVP
 
 ---
 
-## 📹 Sample Video Demonstration
 
-Due to the large file size of uncompressed video datasets (UBFC-RPPG videos total several gigabytes), video files are processed and deleted locally once features are extracted.
-
-If you wish to visualize your own custom video or add a lightweight demo GIF/video to this repository:
-1. Record a short webcam clip (e.g., 10 seconds of a subject's face under stable lighting).
-2. Compress and convert the video using `ffmpeg` to create a lightweight animated GIF:
-   ```bash
-   ffmpeg -i my_video.mp4 -vf "fps=10,scale=320:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" assets/demo.gif
-   ```
-3. Link it in your README:
-   ```markdown
-   ![rPPG Live Demo](assets/demo.gif)
-   ```
 
 ---
 
